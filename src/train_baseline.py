@@ -1,138 +1,116 @@
+# Train a tree-based model to predict the next item_id for user 0 only
+# No scaling or normalization is applied to the features
+
 import mlflow
 import mlflow.sklearn
 import pandas as pd
 import numpy as np
 import joblib
+import os
 
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
-from xgboost import XGBClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import accuracy_score, classification_report
 
 def main():
     # -------------------------------------------------------------------------
     # 1) Load Preprocessed Data
     # -------------------------------------------------------------------------
-    data_path = 'data/processed_data.csv'  # Adjust if your final CSV is named differently
+    data_path = 'data/processed_data.csv'
+    print(f"Loading data from: {data_path}")
     df = pd.read_csv(data_path)
     
-    # If 'timestamp' is not numeric, convert it to a numeric type or
-    # confirm it’s already seconds from epoch in your pre-processing script.
-    # e.g., df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
+    # Filter data for user 0 only
+    df = df[df['user_id'] == 0].copy()
+    print(f"Data shape for user 0: {df.shape}")
+    
+    # Ensure data is sorted by timestamp
+    df.sort_values(by=['timestamp'], inplace=True)
     
     # -------------------------------------------------------------------------
-    # 2) Sort & Create 'next_item_id'
-    #    We assume the data is sorted by user & time in the pre-processing step,
-    #    but let's ensure it again.
+    # 2) Define Features (X) and Label (y)
     # -------------------------------------------------------------------------
-    df.sort_values(by=['user_id', 'timestamp'], inplace=True)
+    # Use raw features without scaling or normalization
+    X = df[['user_id', 'view_time', 'click_rate']]
+    y = df['item_id']
     
-    # Group by user, shift item_id by -1 to get the "next item"
-    df['next_item_id'] = df.groupby('user_id')['item_id'].shift(-1)
+    print(f"Number of samples: {X.shape[0]}")
+    print(f"Number of unique items to predict: {y.nunique()}")
     
-    # Drop rows where next_item_id is NaN (the last item for each user)
-    df.dropna(subset=['next_item_id'], inplace=True)
-    
-    # -------------------------------------------------------------------------
-    # 3) Label Encode user_id, item_id, and next_item_id
-    # -------------------------------------------------------------------------
-    user_encoder = LabelEncoder()
-    item_encoder = LabelEncoder()  # We can use the same encoder for item_id & next_item_id
-                                  # or separate ones if items differ across tasks.
-    
-    df['user_id_encoded'] = user_encoder.fit_transform(df['user_id'])
-    df['item_id_encoded'] = item_encoder.fit_transform(df['item_id'])
-    df['next_item_id_encoded'] = item_encoder.fit_transform(df['next_item_id'])
-    
-    # -------------------------------------------------------------------------
-    # 4) (Optional) Create or use a binary 'target' feature
-    #    If you still want to keep the idea of click_rate > median,
-    #    treat it as an additional input variable. For next-item prediction,
-    #    the real label is next_item_id_encoded.
-    # -------------------------------------------------------------------------
-    df['binary_target'] = (df['click_rate'] > df['click_rate'].median()).astype(int)
-    
-    # -------------------------------------------------------------------------
-    # 5) Define Features (X) and Label (y)
-    #    We'll predict 'next_item_id_encoded' as a multi-class classification.
-    # -------------------------------------------------------------------------
-    # Example features:
-    #   - user_id_encoded, item_id_encoded, timestamp, view_time, click_rate, binary_target
-    # Adjust as needed.
-    X = df[['user_id_encoded',
-            'item_id_encoded',
-            'timestamp',
-            'view_time',
-            'click_rate',
-            'binary_target']]
-    
-    y = df['next_item_id_encoded']
-    
-    # Train/test split
+    # Split data into training and testing sets
     X_train, X_test, y_train, y_test = train_test_split(
-        X, 
-        y, 
-        test_size=0.2, 
-        random_state=42, 
-        shuffle=True
+        X, y, test_size=0.2, random_state=42, shuffle=False
     )
     
     # -------------------------------------------------------------------------
-    # 6) Train Multiple Models and Compare
+    # 3) Train Tree-based Models
     # -------------------------------------------------------------------------
-    models = {
-        "LogisticRegression": LogisticRegression(max_iter=500),
+    tree_models = {
+        "DecisionTree": DecisionTreeClassifier(random_state=42),
         "RandomForest": RandomForestClassifier(n_estimators=100, random_state=42),
-        "XGBClassifier": XGBClassifier(use_label_encoder=False, eval_metric='mlogloss')
+        "GradientBoosting": GradientBoostingClassifier(n_estimators=100, random_state=42)
     }
     
     best_model = None
     best_accuracy = 0.0
     best_model_name = None
     
-    # Loop through each model, start an MLflow run for each
-    for model_name, model in models.items():
-        with mlflow.start_run(run_name=model_name):
-            # Log parameters
+    # Loop through each model and log the experiment using MLflow
+    for model_name, model in tree_models.items():
+        with mlflow.start_run(run_name=f"User0_{model_name}"):
             mlflow.log_param("model_name", model_name)
+            mlflow.log_param("user_id", 0)
             mlflow.log_param("test_size", 0.2)
             
-            # Train
+            # Train the model
             model.fit(X_train, y_train)
             y_pred = model.predict(X_test)
             
-            # Evaluate
+            # Evaluate performance
             accuracy = accuracy_score(y_test, y_pred)
-            report = classification_report(y_test, y_pred, output_dict=True)
+            # Fix warnings by setting zero_division=0 in classification_report
+            report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
             
             # Log metrics to MLflow
             mlflow.log_metric("accuracy", accuracy)
-            # For multi-class, log macro-averaged precision, recall, f1
             mlflow.log_metric("precision_macro", report['macro avg']['precision'])
             mlflow.log_metric("recall_macro", report['macro avg']['recall'])
             mlflow.log_metric("f1_macro", report['macro avg']['f1-score'])
             
-            # Log the model itself
-            mlflow.sklearn.log_model(model, model_name)
+            # Log the model artifact with input example to fix the signature warning
+            sample_input = X_train.iloc[:1].copy()
+            mlflow.sklearn.log_model(model, model_name, input_example=sample_input)
             
-            # Print a quick summary
             print(f"Model: {model_name}, Accuracy: {accuracy:.4f}")
             
-            # Track the best model
+            # Track the best model based on accuracy
             if accuracy > best_accuracy:
                 best_accuracy = accuracy
                 best_model = model
                 best_model_name = model_name
     
     # -------------------------------------------------------------------------
-    # 7) Save the Best Model
+    # 4) Save the Best Model
     # -------------------------------------------------------------------------
     print(f"\nBest model: {best_model_name} with accuracy = {best_accuracy:.4f}")
-    best_model_path = f"models/{best_model_name}_best_model.joblib"
+    
+    # Create models directory if it doesn't exist
+    os.makedirs("models", exist_ok=True)
+    
+    best_model_path = f"models/user0_{best_model_name}_best_model.joblib"
     joblib.dump(best_model, best_model_path)
     print(f"Best model saved to: {best_model_path}")
+    
+    # Save feature importance for tree-based models
+    if hasattr(best_model, 'feature_importances_'):
+        feature_names = X.columns
+        importances = best_model.feature_importances_
+        indices = np.argsort(importances)[::-1]
+        
+        print("\nFeature importance:")
+        for i in range(len(feature_names)):
+            print(f"{feature_names[indices[i]]}: {importances[indices[i]]:.4f}")
 
 if __name__ == "__main__":
     main()

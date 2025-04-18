@@ -3,3 +3,15 @@ pandas
 numpy
 scikit-learn
 matplotlib
+torch
+transformers
+nltk
+pytest
+flask
+python-dotenv
+tqdm
+seaborn
+jupyter
+streamlit
+networkx
+joblib
